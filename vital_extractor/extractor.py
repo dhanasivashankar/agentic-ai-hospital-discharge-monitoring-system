@@ -47,15 +47,17 @@ class VitalExtractor:
         """
         Initialize PaddleOCR once so it can be reused for multiple images.
         """
-        # Use basic, widely supported parameters so this works across
-        # different PaddleOCR versions.
+        self.ocr_engine = None
         if PaddleOCR is not None:
-            self.ocr_engine = PaddleOCR(
-                lang="en",
-                use_angle_cls=True,
-            )
+            try:
+                self.ocr_engine = PaddleOCR(
+                    lang="en",
+                    use_angle_cls=True,
+                )
+            except Exception as e:
+                print(f"Notice: Could not initialize PaddleOCR engine ({e}). VitalExtractor using fallback mode.")
+                self.ocr_engine = None
         else:
-            self.ocr_engine = None
             print("Notice: PaddleOCR is not installed. VitalExtractor will use fallback OCR extraction mode.")
 
     # ------------------------------------------------------------------

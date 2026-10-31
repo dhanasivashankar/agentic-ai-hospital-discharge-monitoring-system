@@ -2,8 +2,7 @@ fastapi
 uvicorn
 motor
 pandas
-opencv-python
+opencv-python-headless
 numpy
-paddleocr
 python-multipart
 reportlab
