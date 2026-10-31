@@ -113,3 +113,44 @@ def search_medicines(query: str, limit: int = 8) -> List[Dict[str, Any]]:
         return results
     except Exception:
         return []
+
+def dispense_medicine(medicine_name: str, quantity: int) -> Dict[str, Any]:
+    """
+    Deducts dispensed medicine quantity from the pharmacy inventory CSV.
+    Updates the availability status ('available', 'limited', 'out_of_stock').
+    """
+    if not os.path.exists(DATASET_PATH) or quantity <= 0:
+        return {"status": "error", "message": "Inventory file not found or invalid quantity"}
+
+    try:
+        df = pd.read_csv(DATASET_PATH)
+        match = _find_matches(df, medicine_name)
+        if match.empty:
+            return {"status": "error", "message": "Medicine not found in inventory"}
+
+        idx = match.index[0]
+        curr_qty = int(df.at[idx, 'quantity'])
+        if curr_qty < quantity:
+            return {"status": "insufficient", "available_qty": curr_qty}
+
+        new_qty = curr_qty - quantity
+        df.at[idx, 'quantity'] = new_qty
+
+        if new_qty == 0:
+            df.at[idx, 'availability'] = 'out_of_stock'
+        elif new_qty < 30:
+            df.at[idx, 'availability'] = 'limited'
+        else:
+            df.at[idx, 'availability'] = 'available'
+
+        df.to_csv(DATASET_PATH, index=False)
+        return {
+            "status": "success",
+            "medicine_name": df.at[idx, 'medicine_name'],
+            "dispensed": quantity,
+            "remaining": new_qty,
+            "availability": df.at[idx, 'availability']
+        }
+    except Exception as e:
+        print("Pharmacy dispense error:", e)
+        return {"status": "error", "message": str(e)}

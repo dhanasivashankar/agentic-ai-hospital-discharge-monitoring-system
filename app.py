@@ -20,8 +20,16 @@ import hashlib
 users_col = db.users
 
 # Agents
-from agents.risk_agent import analyze_vitals, detect_critical_alerts
-from agents.pharmacy_agent import check_medicine_availability, get_medicine_price
+from agents.risk_agent import (
+    analyze_vitals, 
+    detect_alerts, 
+    detect_critical_alerts,
+    calculate_news2_score,
+    calculate_composite_risk_score,
+    assess_patient_risk,
+    evaluate_vitals_trend
+)
+from agents.pharmacy_agent import check_medicine_availability, get_medicine_price, dispense_medicine
 from agents.billing_agent import calculate_bill
 from agents.insurance_agent import check_insurance_eligibility
 from agents.doctor_agent import decide_discharge
@@ -41,8 +49,10 @@ async def verify_admin(request: Request):
         raise HTTPException(status_code=403, detail="Admin access required")
 
 async def verify_patient_exists(patient_id: str):
-    p_id = patient_id.lower()
+    p_id = str(patient_id).strip().lower()
     patient = await patients_col.find_one({"patient_id": p_id})
+    if not patient:
+        patient = await patients_col.find_one({"patient_id": {"$regex": f"^{p_id}$", "$options": "i"}})
     if not patient:
         raise HTTPException(status_code=404, detail="Patient not found")
     return patient
@@ -123,6 +133,7 @@ async def register_patient(
         "doctor": doctor,
         "bed_number": bed_number,
         "status": "admitted",  # Default status
+        "discharge": False,
         "admission_date": datetime.now(),
         "bill_paid": False
     }
@@ -133,7 +144,12 @@ async def register_patient(
 async def upload_vitals(
     request: Request,
     patient_id: str = Form(...),
-    image: UploadFile = File(...)
+    image: UploadFile = File(...),
+    heart_rate: Optional[float] = Form(None),
+    spo2: Optional[float] = Form(None),
+    bp: Optional[str] = Form(None),
+    resp_rate: Optional[float] = Form(None),
+    temperature: Optional[float] = Form(None)
 ):
     await verify_admin(request)
     patient_id = patient_id.strip().lower()
@@ -147,21 +163,40 @@ async def upload_vitals(
     
     # OCR Extraction
     try:
-        img_bgr = load_image(file_path)
-        processed_img = preprocess_image(img_bgr)
-        extracted_vitals = extractor.extract_vitals_from_image(processed_img)
+        # First pass: high-fidelity original image
+        extracted_vitals = extractor.extract_vitals_from_image(file_path, filename=image.filename)
         
-        # Format vitals for agent and storage (fallback to standard clinical vitals if OCR missed any)
+        # Fallback pass: if key vitals are missing, try preprocessed image
+        if any(extracted_vitals.get(k) is None for k in ["heart_rate", "spo2", "blood_pressure", "respiration", "temperature"]):
+            try:
+                img_bgr = load_image(file_path)
+                processed_img = preprocess_image(img_bgr)
+                fallback_vitals = extractor.extract_vitals_from_image(processed_img, filename=image.filename)
+                for k, val in fallback_vitals.items():
+                    if extracted_vitals.get(k) is None and val is not None:
+                        extracted_vitals[k] = val
+            except Exception:
+                pass
+        
+        # Priority: Explicit manual form fields > OCR extracted > safe clinical defaults
+        v_hr = heart_rate if heart_rate is not None else extracted_vitals.get("heart_rate")
+        v_spo2 = spo2 if spo2 is not None else extracted_vitals.get("spo2")
+        v_bp = bp or extracted_vitals.get("blood_pressure") or extracted_vitals.get("bp") or "120/80"
+        v_resp = resp_rate if resp_rate is not None else (extracted_vitals.get("respiration") or extracted_vitals.get("resp_rate"))
+        v_temp = temperature if temperature is not None else extracted_vitals.get("temperature")
+
         vitals = {
-            "heart_rate": extracted_vitals.get("heart_rate") if extracted_vitals.get("heart_rate") is not None else 76,
-            "spo2": extracted_vitals.get("spo2") if extracted_vitals.get("spo2") is not None else 98,
-            "bp": extracted_vitals.get("blood_pressure") or extracted_vitals.get("bp") or "120/80",
-            "resp_rate": extracted_vitals.get("respiration") or extracted_vitals.get("resp_rate") or 16,
-            "temperature": extracted_vitals.get("temperature") if extracted_vitals.get("temperature") is not None else 37.0,
+            "heart_rate": v_hr if v_hr is not None else 76,
+            "spo2": v_spo2 if v_spo2 is not None else 98,
+            "bp": v_bp,
+            "resp_rate": v_resp if v_resp is not None else 16,
+            "temperature": v_temp if v_temp is not None else 37.0,
         }
 
         # Risk Agent Analysis
         risk_level = analyze_vitals(vitals)
+        news2_data = calculate_news2_score(vitals)
+        composite_score = calculate_composite_risk_score(vitals)
         
         # Store Vitals
         vitals_data = {
@@ -173,22 +208,173 @@ async def upload_vitals(
             "resp_rate": vitals.get("resp_rate"),
             "temperature": vitals.get("temperature"),
             "risk_level": risk_level,
+            "news2_score": news2_data.get("total_score", 0),
+            "news2_category": news2_data.get("risk_category", "LOW"),
+            "composite_risk_score": composite_score,
             "timestamp": datetime.now()
         }
         await vitals_col.insert_one(vitals_data)
         
-        # Check Critical Alerts
-        critical_alerts = detect_critical_alerts(patient_id, vitals)
+        # Comprehensive Alert Detection (both Critical and High-Risk)
+        all_alerts = detect_alerts(patient_id, vitals)
+        if all_alerts:
+            for a in all_alerts:
+                a["resolved"] = False
+            await alerts_col.insert_many(all_alerts)
+
+        critical_alerts = [a for a in all_alerts if a.get("severity") == "CRITICAL" or a.get("alert_type") == "CRITICAL_VITAL"]
+        high_risk_alerts = [a for a in all_alerts if a.get("severity") != "CRITICAL" and a.get("alert_type") != "CRITICAL_VITAL"]
+
+        # Update patient status based on severity & auto-resolve alerts when next vitals are good
+        alerts_resolved = False
         if critical_alerts:
-            await alerts_col.insert_many(critical_alerts)
+            await patients_col.update_one({"patient_id": patient_id}, {"$set": {"status": "critical"}})
+        elif risk_level == "HIGH_RISK":
+            patient_current = await patients_col.find_one({"patient_id": patient_id})
+            if patient_current and patient_current.get("status") not in ["discharged", "critical"]:
+                await patients_col.update_one({"patient_id": patient_id}, {"$set": {"status": "high_risk"}})
+        else:
+            # Next vitals are good/normal: normalize status and auto-resolve previous active alerts
+            patient_current = await patients_col.find_one({"patient_id": patient_id})
+            if patient_current and patient_current.get("status") in ["critical", "high_risk"]:
+                await patients_col.update_one({"patient_id": patient_id}, {"$set": {"status": "admitted"}})
+            # Mark all previous unresolved alerts as resolved
+            await alerts_col.update_many(
+                {"patient_id": patient_id, "resolved": {"$ne": True}},
+                {"$set": {"resolved": True, "resolved_at": datetime.now(), "resolved_by": "normalized_vitals"}}
+            )
+            alerts_resolved = True
         
         return {
             "status": "success",
             "vitals": vitals,
             "risk_level": risk_level,
-            "critical_alerts": [a['message'] for a in critical_alerts] if critical_alerts else []
+            "news2": news2_data,
+            "composite_risk_score": composite_score,
+            "critical_alerts": [a['message'] for a in critical_alerts],
+            "risk_alerts": [a['message'] for a in high_risk_alerts],
+            "all_alerts": [a['message'] for a in all_alerts],
+            "alerts_resolved": alerts_resolved
         }
     
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/add_vitals")
+async def add_vitals(request: Request):
+    await verify_admin(request)
+    content_type = request.headers.get("content-type", "")
+    
+    patient_id = None
+    heart_rate = None
+    spo2 = None
+    bp = None
+    resp_rate = None
+    temperature = None
+
+    if "application/json" in content_type:
+        try:
+            body = await request.json()
+            patient_id = body.get("patient_id")
+            heart_rate = body.get("heart_rate")
+            spo2 = body.get("spo2")
+            bp = body.get("bp")
+            resp_rate = body.get("resp_rate")
+            temperature = body.get("temperature")
+        except Exception:
+            pass
+    
+    if not patient_id:
+        form = await request.form()
+        patient_id = form.get("patient_id")
+        heart_rate = form.get("heart_rate")
+        spo2 = form.get("spo2")
+        bp = form.get("bp")
+        resp_rate = form.get("resp_rate")
+        temperature = form.get("temperature")
+
+    if not patient_id:
+        raise HTTPException(status_code=400, detail="patient_id is required")
+
+    patient_id = str(patient_id).strip().lower()
+    await verify_patient_active(patient_id)
+
+    def _to_float(v, default):
+        if v is None or v == "":
+            return default
+        try:
+            return float(v)
+        except (ValueError, TypeError):
+            return default
+
+    try:
+        vitals = {
+            "heart_rate": _to_float(heart_rate, 76),
+            "spo2": _to_float(spo2, 98),
+            "bp": str(bp).strip() if bp else "120/80",
+            "resp_rate": _to_float(resp_rate, 16),
+            "temperature": _to_float(temperature, 37.0),
+        }
+
+        risk_level = analyze_vitals(vitals)
+        news2_data = calculate_news2_score(vitals)
+        composite_score = calculate_composite_risk_score(vitals)
+
+        vitals_data = {
+            "patient_id": patient_id,
+            "image_path": "manual_entry",
+            "heart_rate": vitals.get("heart_rate"),
+            "spo2": vitals.get("spo2"),
+            "bp": vitals.get("bp"),
+            "resp_rate": vitals.get("resp_rate"),
+            "temperature": vitals.get("temperature"),
+            "risk_level": risk_level,
+            "news2_score": news2_data.get("total_score", 0),
+            "news2_category": news2_data.get("risk_category", "LOW"),
+            "composite_risk_score": composite_score,
+            "timestamp": datetime.now()
+        }
+        await vitals_col.insert_one(vitals_data)
+
+        all_alerts = detect_alerts(patient_id, vitals)
+        if all_alerts:
+            for a in all_alerts:
+                a["resolved"] = False
+            await alerts_col.insert_many(all_alerts)
+
+        critical_alerts = [a for a in all_alerts if a.get("severity") == "CRITICAL" or a.get("alert_type") == "CRITICAL_VITAL"]
+        high_risk_alerts = [a for a in all_alerts if a.get("severity") != "CRITICAL" and a.get("alert_type") != "CRITICAL_VITAL"]
+
+        alerts_resolved = False
+        if critical_alerts:
+            await patients_col.update_one({"patient_id": patient_id}, {"$set": {"status": "critical"}})
+        elif risk_level == "HIGH_RISK":
+            patient_current = await patients_col.find_one({"patient_id": patient_id})
+            if patient_current and patient_current.get("status") not in ["discharged", "critical"]:
+                await patients_col.update_one({"patient_id": patient_id}, {"$set": {"status": "high_risk"}})
+        else:
+            # Next vitals are good/normal: normalize status and auto-resolve previous active alerts
+            patient_current = await patients_col.find_one({"patient_id": patient_id})
+            if patient_current and patient_current.get("status") in ["critical", "high_risk"]:
+                await patients_col.update_one({"patient_id": patient_id}, {"$set": {"status": "admitted"}})
+            # Mark all previous unresolved alerts as resolved
+            await alerts_col.update_many(
+                {"patient_id": patient_id, "resolved": {"$ne": True}},
+                {"$set": {"resolved": True, "resolved_at": datetime.now(), "resolved_by": "normalized_vitals"}}
+            )
+            alerts_resolved = True
+
+        return {
+            "status": "success",
+            "vitals": vitals,
+            "risk_level": risk_level,
+            "news2": news2_data,
+            "composite_risk_score": composite_score,
+            "critical_alerts": [a['message'] for a in critical_alerts],
+            "risk_alerts": [a['message'] for a in high_risk_alerts],
+            "all_alerts": [a['message'] for a in all_alerts],
+            "alerts_resolved": alerts_resolved
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -209,6 +395,9 @@ async def assign_medicine(request: Request, patient_id: str = Form(...), medicin
         })
         return {"status": "unavailable", "message": "Medicine not available"}
     
+    # Deduct from dynamic inventory
+    dispense_result = dispense_medicine(medicine_name, quantity)
+
     price = get_medicine_price(medicine_name)
     total_cost = price * quantity
     
@@ -223,7 +412,13 @@ async def assign_medicine(request: Request, patient_id: str = Form(...), medicin
     }
     await prescriptions_col.insert_one(prescription)
     
-    return {"status": "success", "availability": availability, "total_cost": total_cost}
+    return {
+        "status": "success", 
+        "availability": availability, 
+        "total_cost": total_cost,
+        "dispensed": quantity,
+        "inventory_status": dispense_result.get("availability", availability)
+    }
 
 @app.get("/search_medicines")
 async def search_pharmacy_medicines(q: str = ""):
@@ -374,9 +569,13 @@ async def get_decision(patient_id: str):
     time_limit_48h = datetime.now() - timedelta(hours=48)
     vitals_history = await vitals_col.find({"patient_id": patient_id, "timestamp": {"$gte": time_limit_48h}}).to_list(100)
     
-    # Check for Critical alerts in last 24h
+    # Check for ACTIVE (unresolved) Critical alerts in last 24h
     time_limit_24h = datetime.now() - timedelta(hours=24)
-    alerts_24h = await alerts_col.find({"patient_id": patient_id, "timestamp": {"$gte": time_limit_24h}}).to_list(100)
+    alerts_24h = await alerts_col.find({
+        "patient_id": patient_id, 
+        "timestamp": {"$gte": time_limit_24h},
+        "resolved": {"$ne": True}
+    }).to_list(100)
     has_critical_alerts = any("CRITICAL" in a.get("message", "").upper() or "CRITICAL" in a.get("alert_type", "").upper() for a in alerts_24h)
     
     # Billing info
@@ -419,7 +618,59 @@ async def get_alerts(patient_id: str):
     alerts = await alerts_col.find({"patient_id": patient_id}).sort("timestamp", -1).to_list(50)
     for a in alerts:
         a["_id"] = str(a["_id"])
+        if "resolved" not in a:
+            a["resolved"] = False
+        if "severity" not in a:
+            type_str = a.get("alert_type", "").upper()
+            msg_str = a.get("message", "").upper()
+            if "CRITICAL" in type_str or "CRITICAL" in msg_str:
+                a["severity"] = "CRITICAL"
+            elif "HIGH" in type_str or "HIGH" in msg_str:
+                a["severity"] = "HIGH"
+            elif "PHARMACY" in type_str or "PHARMACY" in msg_str:
+                a["severity"] = "PHARMACY"
+            else:
+                a["severity"] = "HIGH"
     return alerts
+
+@app.post("/resolve_alerts/{patient_id}")
+async def resolve_alerts(patient_id: str):
+    p_id = patient_id.lower()
+    await verify_patient_exists(p_id)
+    result = await alerts_col.update_many(
+        {"patient_id": p_id, "resolved": {"$ne": True}},
+        {"$set": {"resolved": True, "resolved_at": datetime.now(), "resolved_by": "manual_action"}}
+    )
+    latest = await vitals_col.find_one({"patient_id": p_id}, sort=[("timestamp", -1)])
+    if latest and latest.get("risk_level") == "LOW_RISK":
+        await patients_col.update_one({"patient_id": p_id, "status": {"$in": ["critical", "high_risk"]}}, {"$set": {"status": "admitted"}})
+    return {"status": "success", "resolved_count": result.modified_count, "message": "Alerts marked as resolved"}
+
+@app.post("/resolve_alert/{alert_id}")
+async def resolve_single_alert(alert_id: str):
+    try:
+        obj_id = ObjectId(alert_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid alert ID")
+    alert = await alerts_col.find_one({"_id": obj_id})
+    if not alert:
+        raise HTTPException(status_code=404, detail="Alert not found")
+    await alerts_col.update_one(
+        {"_id": obj_id},
+        {"$set": {"resolved": True, "resolved_at": datetime.now(), "resolved_by": "manual_action"}}
+    )
+    p_id = alert.get("patient_id")
+    if p_id:
+        active_critical = await alerts_col.find_one({
+            "patient_id": p_id,
+            "resolved": {"$ne": True},
+            "$or": [{"severity": "CRITICAL"}, {"alert_type": "CRITICAL_VITAL"}]
+        })
+        if not active_critical:
+            latest = await vitals_col.find_one({"patient_id": p_id}, sort=[("timestamp", -1)])
+            if latest and latest.get("risk_level") == "LOW_RISK":
+                await patients_col.update_one({"patient_id": p_id, "status": {"$in": ["critical", "high_risk"]}}, {"$set": {"status": "admitted"}})
+    return {"status": "success", "message": "Alert marked as solved"}
 
 @app.get("/latest_vitals/{patient_id}")
 async def get_latest_vitals(patient_id: str):
@@ -429,7 +680,25 @@ async def get_latest_vitals(patient_id: str):
     if not latest:
         return {}
     latest["_id"] = str(latest["_id"])
+    if "news2_score" not in latest:
+        n2 = calculate_news2_score(latest)
+        latest["news2_score"] = n2.get("total_score", 0)
+        latest["news2_category"] = n2.get("risk_category", "LOW")
+    if "composite_risk_score" not in latest:
+        latest["composite_risk_score"] = calculate_composite_risk_score(latest)
     return latest
+
+@app.get("/risk_assessment/{patient_id}")
+async def get_patient_risk_assessment(patient_id: str):
+    patient_id = patient_id.lower()
+    await verify_patient_exists(patient_id)
+    history = await vitals_col.find({"patient_id": patient_id}).sort("timestamp", -1).to_list(50)
+    if not history:
+        return {"patient_id": patient_id, "message": "No vitals recorded for patient"}
+    latest = history[0]
+    assessment = assess_patient_risk(patient_id, latest, history)
+    return assessment
+
 
 @app.get("/prescriptions/{patient_id}")
 async def get_prescriptions(patient_id: str):
