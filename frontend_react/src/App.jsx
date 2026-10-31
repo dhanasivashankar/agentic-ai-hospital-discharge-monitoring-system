@@ -47,7 +47,7 @@ ChartJS.register(
   Filler
 );
 
-const API_BASE = "http://localhost:8000";
+const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8000";
 
 function App() {
   const [view, setView] = useState('login');
@@ -200,12 +200,28 @@ function AdminPanel({ logout, onSelectPatient, setAlert }) {
   const [patients, setPatients] = useState([]);
   const [loading, setLoading] = useState(true);
   const [view, setView] = useState('registry'); // 'registry', 'scan', 'pharmacy'
-  const [targetId, setTargetId] = useState('');
+
+  // Scan state
+  const [scanPatientId, setScanPatientId] = useState('');
+  const [selectedFile, setSelectedFile] = useState(null);
+  const [previewUrl, setPreviewUrl] = useState(null);
+  const [uploadingScan, setUploadingScan] = useState(false);
+  const [scanResult, setScanResult] = useState(null);
+  const [scanError, setScanError] = useState('');
+
+  // Pharmacy state
+  const [pharmPatientId, setPharmPatientId] = useState('');
+  const [pharmError, setPharmError] = useState('');
+  const [pharmSuccess, setPharmSuccess] = useState('');
 
   const fetchPatients = async () => {
     try {
       const res = await axios.get(`${API_BASE}/patients`);
       setPatients(res.data);
+      if (res.data && res.data.length > 0) {
+        setScanPatientId(prev => prev || res.data[0].patient_id);
+        setPharmPatientId(prev => prev || res.data[0].patient_id);
+      }
     } catch (err) { console.error(err); }
     setLoading(false);
   };
@@ -215,19 +231,59 @@ function AdminPanel({ logout, onSelectPatient, setAlert }) {
   const registerPatient = async (e) => {
     e.preventDefault();
     const formData = new FormData(e.target);
-    const res = await axios.post(`${API_BASE}/register_patient`, formData);
-    alert(`Registered: ${res.data.patient_id}`);
-    fetchPatients();
+    try {
+      const res = await axios.post(`${API_BASE}/register_patient`, formData, {
+        headers: { 'X-Role': 'admin' }
+      });
+      alert(`Patient Registered! ID: ${res.data.patient_id}`);
+      fetchPatients();
+      e.target.reset();
+    } catch (err) {
+      alert("Registration failed: " + (err.response?.data?.detail || err.message));
+    }
+  };
+
+  const handleImageChange = (e) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      setSelectedFile(file);
+      setPreviewUrl(URL.createObjectURL(file));
+      setScanError('');
+      setScanResult(null);
+    }
   };
 
   const uploadVitals = async (e) => {
     e.preventDefault();
-    const formData = new FormData(e.target);
+    if (!scanPatientId.trim()) {
+      setScanError("Please select or specify a Patient ID.");
+      return;
+    }
+    if (!selectedFile) {
+      setScanError("Please select or drop a monitor snapshot image.");
+      return;
+    }
+    setUploadingScan(true);
+    setScanError('');
+    setScanResult(null);
+
+    const formData = new FormData();
+    formData.append('patient_id', scanPatientId.trim().toLowerCase());
+    formData.append('image', selectedFile);
+
     try {
-      const res = await axios.post(`${API_BASE}/upload_vitals`, formData);
-      if (res.data.critical_alerts?.length > 0) setAlert(res.data.critical_alerts[0]);
-      alert(`Vitals Processed. Risk: ${res.data.risk_level}`);
-    } catch (err) { alert("Error uploading vitals"); }
+      const res = await axios.post(`${API_BASE}/upload_vitals`, formData, {
+        headers: { 'X-Role': 'admin' }
+      });
+      if (res.data.critical_alerts?.length > 0) {
+        setAlert(res.data.critical_alerts[0]);
+      }
+      setScanResult(res.data);
+    } catch (err) {
+      setScanError(err.response?.data?.detail || err.message || "Error analyzing monitor snapshot");
+    } finally {
+      setUploadingScan(false);
+    }
   };
 
   return (
@@ -248,17 +304,17 @@ function AdminPanel({ logout, onSelectPatient, setAlert }) {
       <main className="max-w-7xl mx-auto p-6 md:p-10">
         {view === 'registry' && (
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-            <div className="lg:col-span-1 bg-[#1e293b] rounded-3xl p-8 border border-white/5 h-fit sticky top-28">
+            <div className="lg:col-span-1 bg-[#1e293b] rounded-3xl p-8 border border-white/5 h-fit sticky top-28 shadow-xl">
               <h2 className="text-xl font-bold flex items-center gap-3 mb-6"><PlusCircle className="text-indigo-400"/> New Registration</h2>
               <form onSubmit={registerPatient} className="space-y-4">
-                <input name="name" placeholder="Full Name" required className="w-full bg-[#0f172a] border border-white/10 p-3 rounded-xl" />
+                <input name="name" placeholder="Full Name" required className="w-full bg-[#0f172a] border border-white/10 p-3 rounded-xl text-white outline-none focus:border-indigo-500" />
                 <div className="grid grid-cols-2 gap-4">
-                  <input name="age" type="number" placeholder="Age" required className="w-full bg-[#0f172a] border border-white/10 p-3 rounded-xl" />
-                  <input name="doctor" placeholder="Doctor" required className="w-full bg-[#0f172a] border border-white/10 p-3 rounded-xl" />
+                  <input name="age" type="number" placeholder="Age" required className="w-full bg-[#0f172a] border border-white/10 p-3 rounded-xl text-white outline-none focus:border-indigo-500" />
+                  <input name="doctor" placeholder="Doctor" required className="w-full bg-[#0f172a] border border-white/10 p-3 rounded-xl text-white outline-none focus:border-indigo-500" />
                 </div>
-                <input name="disease" placeholder="Primary Diagnosis" required className="w-full bg-[#0f172a] border border-white/10 p-3 rounded-xl" />
-                <input name="bed_number" placeholder="Bed / Ward" required className="w-full bg-[#0f172a] border border-white/10 p-3 rounded-xl" />
-                <button className="w-full bg-indigo-600 py-4 rounded-xl font-bold">Register Patient</button>
+                <input name="disease" placeholder="Primary Diagnosis" required className="w-full bg-[#0f172a] border border-white/10 p-3 rounded-xl text-white outline-none focus:border-indigo-500" />
+                <input name="bed_number" placeholder="Bed / Ward" required className="w-full bg-[#0f172a] border border-white/10 p-3 rounded-xl text-white outline-none focus:border-indigo-500" />
+                <button className="w-full bg-indigo-600 hover:bg-indigo-500 py-4 rounded-xl font-bold shadow-lg shadow-indigo-600/20 transition-all">Register Patient</button>
               </form>
             </div>
             <div className="lg:col-span-2 space-y-6">
@@ -271,12 +327,13 @@ function AdminPanel({ logout, onSelectPatient, setAlert }) {
                         <div className="w-12 h-12 bg-indigo-500/10 rounded-2xl flex items-center justify-center text-indigo-400 group-hover:bg-indigo-600 group-hover:text-white transition-colors">
                           <Activity size={24}/>
                         </div>
-                        <span className="text-[10px] font-bold text-gray-500 px-2 py-1 bg-white/5 rounded-md uppercase tracking-widest">{p.patient_id}</span>
+                        <span className="text-[10px] font-bold text-gray-400 px-2.5 py-1 bg-white/5 rounded-md uppercase tracking-widest font-mono">{p.patient_id}</span>
                       </div>
                       <h3 className="text-lg font-bold group-hover:text-indigo-400 transition-colors">{p.name || p.full_name}</h3>
                       <p className="text-sm text-gray-400 mb-4">{p.disease || p.primary_diagnosis || "General Checkup"}</p>
-                      <div className="flex items-center gap-2 text-xs text-gray-500">
-                        <Calendar size={12}/> {new Date(p.admission_date.$date || p.admission_date).toLocaleDateString()}
+                      <div className="flex items-center justify-between text-xs text-gray-500">
+                        <div className="flex items-center gap-2"><Calendar size={12}/> {new Date(p.admission_date?.$date || p.admission_date || Date.now()).toLocaleDateString()}</div>
+                        <span className="text-indigo-400 font-medium">Bed: {p.bed_number || 'N/A'}</span>
                       </div>
                     </motion.div>
                   ))}
@@ -287,33 +344,258 @@ function AdminPanel({ logout, onSelectPatient, setAlert }) {
         )}
 
         {view === 'scan' && (
-          <div className="max-w-2xl mx-auto bg-[#1e293b] p-8 rounded-3xl border border-white/5">
-            <h2 className="text-2xl font-bold flex items-center gap-3 mb-8"><Upload className="text-indigo-400"/> Vital Scan (OCR)</h2>
-            <form onSubmit={uploadVitals} className="space-y-6">
-              <input name="patient_id" placeholder="Patient ID" required className="w-full bg-[#0f172a] border border-white/10 p-4 rounded-xl" />
-              <div className="border-2 border-dashed border-white/10 rounded-2xl p-12 text-center hover:border-indigo-500/50 cursor-pointer group transition-all">
-                <input type="file" name="image" required className="absolute opacity-0 inset-0 cursor-pointer" />
-                <Activity size={48} className="mx-auto text-gray-600 mb-4 group-hover:text-indigo-400" />
-                <p className="text-gray-400">Upload monitor snapshot</p>
-              </div>
-              <button className="w-full bg-indigo-600 py-4 rounded-xl font-bold text-lg">Analyze Vitals</button>
-            </form>
+          <div className="max-w-2xl mx-auto space-y-6">
+            <div className="bg-[#1e293b] p-8 rounded-3xl border border-white/5 shadow-2xl">
+              <h2 className="text-2xl font-bold flex items-center gap-3 mb-6">
+                <Upload className="text-indigo-400"/> Vital Scan (OCR)
+              </h2>
+
+              <form onSubmit={uploadVitals} className="space-y-6">
+                <div>
+                  <label className="block text-xs font-bold text-gray-400 uppercase mb-2">Select Target Patient</label>
+                  {patients.length > 0 ? (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <select
+                        value={scanPatientId}
+                        onChange={(e) => { setScanPatientId(e.target.value); setScanError(''); setScanResult(null); }}
+                        className="w-full bg-[#0f172a] border border-white/10 p-3.5 rounded-xl text-white outline-none focus:border-indigo-500 text-sm cursor-pointer"
+                      >
+                        <option value="">-- Select Patient --</option>
+                        {patients.map(p => (
+                          <option key={p.patient_id} value={p.patient_id}>
+                            {p.name || p.full_name} ({p.patient_id})
+                          </option>
+                        ))}
+                      </select>
+                      <input
+                        name="patient_id"
+                        value={scanPatientId}
+                        onChange={(e) => { setScanPatientId(e.target.value); setScanError(''); setScanResult(null); }}
+                        placeholder="Or type Patient ID"
+                        required
+                        className="w-full bg-[#0f172a] border border-white/10 p-3.5 rounded-xl text-white outline-none focus:border-indigo-500 font-mono text-sm"
+                      />
+                    </div>
+                  ) : (
+                    <input
+                      name="patient_id"
+                      value={scanPatientId}
+                      onChange={(e) => { setScanPatientId(e.target.value); setScanError(''); setScanResult(null); }}
+                      placeholder="Enter Patient ID (e.g. a4a737db)"
+                      required
+                      className="w-full bg-[#0f172a] border border-white/10 p-4 rounded-xl text-white outline-none focus:border-indigo-500 font-mono"
+                    />
+                  )}
+                </div>
+
+                {/* Dropzone with relative container to fix positioning */}
+                <div className="relative border-2 border-dashed border-white/15 rounded-2xl p-8 text-center hover:border-indigo-500/70 transition-all bg-[#0f172a]/50">
+                  <input
+                    type="file"
+                    name="image"
+                    accept="image/*"
+                    onChange={handleImageChange}
+                    className="absolute inset-0 opacity-0 cursor-pointer w-full h-full z-10"
+                  />
+                  {previewUrl ? (
+                    <div className="flex flex-col items-center gap-3">
+                      <img src={previewUrl} alt="Monitor snapshot preview" className="max-h-52 rounded-xl object-contain shadow-lg border border-white/10" />
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm font-semibold text-indigo-300">{selectedFile?.name}</span>
+                        <span className="text-xs text-gray-500">({(selectedFile?.size / 1024).toFixed(1)} KB)</span>
+                      </div>
+                      <p className="text-xs text-gray-400">Click or drag another image to replace</p>
+                    </div>
+                  ) : (
+                    <div className="py-4">
+                      <Activity size={48} className="mx-auto text-gray-500 mb-3 group-hover:text-indigo-400 transition-colors" />
+                      <p className="text-white font-medium mb-1">Click to browse or drop monitor snapshot here</p>
+                      <p className="text-xs text-gray-500">Supports JPG, PNG, WEBP snapshot images</p>
+                    </div>
+                  )}
+                </div>
+
+                {scanError && (
+                  <div className="p-4 bg-red-500/10 border border-red-500/20 text-red-400 text-sm rounded-xl flex items-center gap-2">
+                    <AlertTriangle size={18} className="shrink-0" /> <span>{scanError}</span>
+                  </div>
+                )}
+
+                <button
+                  type="submit"
+                  disabled={uploadingScan}
+                  className="w-full bg-indigo-600 hover:bg-indigo-500 py-4 rounded-xl font-bold text-lg shadow-lg shadow-indigo-600/20 transition-all flex items-center justify-center gap-2 disabled:opacity-50"
+                >
+                  {uploadingScan ? (
+                    <>
+                      <Activity className="animate-spin" size={20} />
+                      Extracting Vitals with Vision OCR...
+                    </>
+                  ) : (
+                    <>
+                      <Upload size={20} />
+                      Analyze Vitals
+                    </>
+                  )}
+                </button>
+              </form>
+            </div>
+
+            {/* Extracted Vitals Result Card */}
+            {scanResult && (
+              <motion.div
+                initial={{ opacity: 0, y: 15 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="bg-[#1e293b] p-8 rounded-3xl border border-emerald-500/30 shadow-2xl space-y-6"
+              >
+                <div className="flex justify-between items-center">
+                  <div className="flex items-center gap-3">
+                    <CheckCircle2 className="text-emerald-400 w-6 h-6" />
+                    <div>
+                      <h3 className="font-bold text-lg text-white">OCR Extraction Successful</h3>
+                      <p className="text-xs text-gray-400">Recorded for Patient ID: <span className="font-mono text-indigo-400 font-bold">{scanPatientId}</span></p>
+                    </div>
+                  </div>
+                  <span className={`px-4 py-1.5 rounded-full text-xs font-black uppercase tracking-wider border ${
+                    scanResult.risk_level === 'HIGH_RISK'
+                      ? 'bg-red-500/15 border-red-500/40 text-red-400'
+                      : 'bg-emerald-500/15 border-emerald-500/40 text-emerald-400'
+                  }`}>
+                    {scanResult.risk_level}
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
+                  <div className="bg-[#0f172a] p-4 rounded-2xl text-center border border-white/5">
+                    <span className="block text-[10px] text-gray-400 font-bold uppercase">Heart Rate</span>
+                    <span className="text-xl font-black text-indigo-400">{scanResult.vitals?.heart_rate ?? '--'}</span>
+                    <span className="block text-[10px] text-gray-500">bpm</span>
+                  </div>
+                  <div className="bg-[#0f172a] p-4 rounded-2xl text-center border border-white/5">
+                    <span className="block text-[10px] text-gray-400 font-bold uppercase">SpO2</span>
+                    <span className="text-xl font-black text-cyan-400">{scanResult.vitals?.spo2 ?? '--'}</span>
+                    <span className="block text-[10px] text-gray-500">%</span>
+                  </div>
+                  <div className="bg-[#0f172a] p-4 rounded-2xl text-center border border-white/5">
+                    <span className="block text-[10px] text-gray-400 font-bold uppercase">Blood Pressure</span>
+                    <span className="text-xl font-black text-purple-400">{scanResult.vitals?.bp ?? '--'}</span>
+                    <span className="block text-[10px] text-gray-500">mmHg</span>
+                  </div>
+                  <div className="bg-[#0f172a] p-4 rounded-2xl text-center border border-white/5">
+                    <span className="block text-[10px] text-gray-400 font-bold uppercase">Resp Rate</span>
+                    <span className="text-xl font-black text-emerald-400">{scanResult.vitals?.resp_rate ?? '--'}</span>
+                    <span className="block text-[10px] text-gray-500">br/min</span>
+                  </div>
+                  <div className="bg-[#0f172a] p-4 rounded-2xl text-center border border-white/5">
+                    <span className="block text-[10px] text-gray-400 font-bold uppercase">Temperature</span>
+                    <span className="text-xl font-black text-rose-400">{scanResult.vitals?.temperature ?? '--'}</span>
+                    <span className="block text-[10px] text-gray-500">°C</span>
+                  </div>
+                </div>
+
+                {scanResult.critical_alerts && scanResult.critical_alerts.length > 0 && (
+                  <div className="p-4 bg-red-500/10 border border-red-500/30 rounded-2xl">
+                    <h4 className="text-xs font-bold text-red-400 uppercase tracking-wider mb-1">⚠ Critical Alerts Triggered</h4>
+                    {scanResult.critical_alerts.map((alertMsg, idx) => (
+                      <p key={idx} className="text-sm text-red-200">{alertMsg}</p>
+                    ))}
+                  </div>
+                )}
+
+                <div className="flex gap-4">
+                  <button
+                    type="button"
+                    onClick={() => onSelectPatient(scanPatientId)}
+                    className="flex-1 bg-indigo-600 hover:bg-indigo-500 py-3 rounded-xl font-bold text-sm transition-all flex items-center justify-center gap-2 shadow-lg shadow-indigo-600/20"
+                  >
+                    Open Patient Dashboard <ChevronRight size={16} />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => { setScanResult(null); setSelectedFile(null); setPreviewUrl(null); }}
+                    className="px-6 bg-white/5 hover:bg-white/10 py-3 rounded-xl font-medium text-sm transition-all text-gray-300"
+                  >
+                    Scan Another
+                  </button>
+                </div>
+              </motion.div>
+            )}
           </div>
         )}
 
         {view === 'pharmacy' && (
-          <div className="max-w-2xl mx-auto bg-[#1e293b] p-8 rounded-3xl border border-white/5">
+          <div className="max-w-2xl mx-auto bg-[#1e293b] p-8 rounded-3xl border border-white/5 shadow-2xl">
             <h2 className="text-2xl font-bold flex items-center gap-3 mb-8"><Stethoscope className="text-green-400"/> Prescription Manager</h2>
             <form onSubmit={async (e) => {
               e.preventDefault();
+              setPharmError('');
+              setPharmSuccess('');
               const formData = new FormData(e.target);
-              const res = await axios.post(`${API_BASE}/assign_medicine`, formData);
-              alert(res.data.status === "success" ? `Assigned! Cost: $${res.data.total_cost}` : res.data.message);
+              try {
+                const res = await axios.post(`${API_BASE}/assign_medicine`, formData, {
+                  headers: { 'X-Role': 'admin' }
+                });
+                if (res.data.status === "success") {
+                  setPharmSuccess(`Medicine assigned successfully! Total cost: $${res.data.total_cost}`);
+                  e.target.reset();
+                } else {
+                  setPharmError(res.data.message || "Medicine unavailable in inventory");
+                }
+              } catch (err) {
+                setPharmError(err.response?.data?.detail || err.message || "Failed to assign prescription");
+              }
             }} className="space-y-6">
-              <input name="patient_id" placeholder="Patient ID" required className="w-full bg-[#0f172a] border border-white/10 p-4 rounded-xl" />
-              <input name="medicine_name" placeholder="Medicine Name" required className="w-full bg-[#0f172a] border border-white/10 p-4 rounded-xl" />
-              <input name="quantity" type="number" placeholder="Quantity" required className="w-full bg-[#0f172a] border border-white/10 p-4 rounded-xl" />
-              <button className="w-full bg-green-600 py-4 rounded-xl font-bold text-lg">Assign Prescription</button>
+              <div>
+                <label className="block text-xs font-bold text-gray-400 uppercase mb-2">Select Target Patient</label>
+                {patients.length > 0 ? (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <select
+                      value={pharmPatientId}
+                      onChange={(e) => { setPharmPatientId(e.target.value); setPharmError(''); setPharmSuccess(''); }}
+                      className="w-full bg-[#0f172a] border border-white/10 p-3.5 rounded-xl text-white outline-none focus:border-green-500 text-sm cursor-pointer"
+                    >
+                      <option value="">-- Select Patient --</option>
+                      {patients.map(p => (
+                        <option key={p.patient_id} value={p.patient_id}>
+                          {p.name || p.full_name} ({p.patient_id})
+                        </option>
+                      ))}
+                    </select>
+                    <input
+                      name="patient_id"
+                      value={pharmPatientId}
+                      onChange={(e) => { setPharmPatientId(e.target.value); setPharmError(''); setPharmSuccess(''); }}
+                      placeholder="Or enter Patient ID"
+                      required
+                      className="w-full bg-[#0f172a] border border-white/10 p-3.5 rounded-xl text-white outline-none focus:border-green-500 font-mono text-sm"
+                    />
+                  </div>
+                ) : (
+                  <input
+                    name="patient_id"
+                    value={pharmPatientId}
+                    onChange={(e) => { setPharmPatientId(e.target.value); setPharmError(''); setPharmSuccess(''); }}
+                    placeholder="Enter Patient ID"
+                    required
+                    className="w-full bg-[#0f172a] border border-white/10 p-4 rounded-xl text-white outline-none focus:border-green-500 font-mono"
+                  />
+                )}
+              </div>
+              <input name="medicine_name" placeholder="Medicine Name (e.g. Paracetamol, Amoxicillin)" required className="w-full bg-[#0f172a] border border-white/10 p-4 rounded-xl text-white outline-none focus:border-green-500" />
+              <input name="quantity" type="number" min="1" placeholder="Quantity" required className="w-full bg-[#0f172a] border border-white/10 p-4 rounded-xl text-white outline-none focus:border-green-500" />
+              
+              {pharmError && (
+                <div className="p-4 bg-red-500/10 border border-red-500/20 text-red-400 text-sm rounded-xl flex items-center gap-2">
+                  <AlertTriangle size={18} className="shrink-0" /> {pharmError}
+                </div>
+              )}
+              {pharmSuccess && (
+                <div className="p-4 bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-sm rounded-xl flex items-center gap-2">
+                  <CheckCircle2 size={18} className="shrink-0" /> {pharmSuccess}
+                </div>
+              )}
+
+              <button className="w-full bg-green-600 hover:bg-green-500 py-4 rounded-xl font-bold text-lg transition-all shadow-lg shadow-green-600/20">Assign Prescription</button>
             </form>
           </div>
         )}

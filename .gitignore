@@ -9,6 +9,7 @@ backend_log.txt
 *.jpg
 *.jpeg
 uploads/
+reports/
 
 # Node/React
 node_modules/
