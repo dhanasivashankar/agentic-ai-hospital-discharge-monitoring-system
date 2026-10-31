@@ -213,6 +213,23 @@ function AdminPanel({ logout, onSelectPatient, setAlert }) {
   const [pharmPatientId, setPharmPatientId] = useState('');
   const [pharmError, setPharmError] = useState('');
   const [pharmSuccess, setPharmSuccess] = useState('');
+  const [medQuery, setMedQuery] = useState('');
+  const [medSuggestions, setMedSuggestions] = useState([]);
+
+  const handleMedQueryChange = async (val) => {
+    setMedQuery(val);
+    setPharmError('');
+    if (val.trim().length >= 2) {
+      try {
+        const res = await axios.get(`${API_BASE}/search_medicines?q=${encodeURIComponent(val)}`);
+        setMedSuggestions(res.data || []);
+      } catch (e) {
+        setMedSuggestions([]);
+      }
+    } else {
+      setMedSuggestions([]);
+    }
+  };
 
   const fetchPatients = async () => {
     try {
@@ -581,8 +598,65 @@ function AdminPanel({ logout, onSelectPatient, setAlert }) {
                   />
                 )}
               </div>
-              <input name="medicine_name" placeholder="Medicine Name (e.g. Paracetamol, Amoxicillin)" required className="w-full bg-[#0f172a] border border-white/10 p-4 rounded-xl text-white outline-none focus:border-green-500" />
-              <input name="quantity" type="number" min="1" placeholder="Quantity" required className="w-full bg-[#0f172a] border border-white/10 p-4 rounded-xl text-white outline-none focus:border-green-500" />
+              <div>
+                <label className="block text-xs font-bold text-gray-400 uppercase mb-2">Medicine Name</label>
+                <div className="relative">
+                  <input
+                    name="medicine_name"
+                    value={medQuery}
+                    onChange={(e) => handleMedQueryChange(e.target.value)}
+                    placeholder="Search or enter medicine (e.g. Amoxicillin, Paracetamol)"
+                    required
+                    autoComplete="off"
+                    className="w-full bg-[#0f172a] border border-white/10 p-4 rounded-xl text-white outline-none focus:border-green-500"
+                  />
+                  {medSuggestions.length > 0 && (
+                    <div className="absolute top-full left-0 right-0 mt-2 bg-[#0f172a] border border-white/15 rounded-2xl shadow-2xl z-30 overflow-hidden max-h-60 overflow-y-auto">
+                      {medSuggestions.map((m, idx) => (
+                        <div
+                          key={idx}
+                          onClick={() => {
+                            setMedQuery(m.medicine_name);
+                            setMedSuggestions([]);
+                          }}
+                          className="p-3.5 hover:bg-white/5 cursor-pointer border-b border-white/5 flex items-center justify-between text-sm transition-colors"
+                        >
+                          <div>
+                            <span className="font-semibold text-white">{m.medicine_name}</span>
+                            <span className="text-xs text-gray-500 block">Stock: {m.quantity} available</span>
+                          </div>
+                          <span className="text-xs font-mono text-green-400 font-bold">${m.price}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {/* Popular Medicine Quick Chips */}
+                <div className="flex flex-wrap gap-2 mt-3">
+                  <span className="text-[10px] text-gray-500 font-bold uppercase tracking-wider self-center">Popular:</span>
+                  {[
+                    "Amoxicillin 500mg Capsule",
+                    "Paracetamol 500mg Tablet",
+                    "Dolo 650 Tablet",
+                    "Azithromycin 500mg Tablet"
+                  ].map((chip) => (
+                    <button
+                      key={chip}
+                      type="button"
+                      onClick={() => { setMedQuery(chip); setMedSuggestions([]); setPharmError(''); }}
+                      className="text-xs bg-white/5 hover:bg-green-500/20 hover:text-green-300 text-gray-400 px-3 py-1.5 rounded-lg border border-white/5 transition-all"
+                    >
+                      {chip.split(" ")[0]}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-gray-400 uppercase mb-2">Quantity</label>
+                <input name="quantity" type="number" min="1" placeholder="Quantity" defaultValue="1" required className="w-full bg-[#0f172a] border border-white/10 p-4 rounded-xl text-white outline-none focus:border-green-500" />
+              </div>
               
               {pharmError && (
                 <div className="p-4 bg-red-500/10 border border-red-500/20 text-red-400 text-sm rounded-xl flex items-center gap-2">

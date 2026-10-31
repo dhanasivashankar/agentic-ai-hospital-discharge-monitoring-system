@@ -225,6 +225,11 @@ async def assign_medicine(request: Request, patient_id: str = Form(...), medicin
     
     return {"status": "success", "availability": availability, "total_cost": total_cost}
 
+@app.get("/search_medicines")
+async def search_pharmacy_medicines(q: str = ""):
+    from agents.pharmacy_agent import search_medicines
+    return search_medicines(q)
+
 @app.get("/patient/{patient_id}")
 async def get_patient(patient_id: str):
     patient = await verify_patient_exists(patient_id)
