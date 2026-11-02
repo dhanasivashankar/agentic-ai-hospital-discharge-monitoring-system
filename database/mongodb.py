@@ -4,7 +4,7 @@ import os
 # --- MONGODB ATLAS CONNECTION ---
 # The previous attempt failed with "bad auth". 
 # STEP: Replace <db_password> below with your ACTUAL database password.
-MONGODB_URI = "mongodb+srv://admin:HospitalSecure123@cluster0.9btwz77.mongodb.net/?appName=Cluster0"
+MONGODB_URI = os.environ.get("MONGODB_URI") or os.environ.get("MONGO_URI") or "mongodb+srv://admin:HospitalSecure123@cluster0.9btwz77.mongodb.net/?appName=Cluster0"
 
 client = motor.motor_asyncio.AsyncIOMotorClient(
     MONGODB_URI,

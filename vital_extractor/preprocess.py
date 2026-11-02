@@ -20,6 +20,16 @@ def load_image(image_path: str) -> np.ndarray:
     image = cv2.imread(image_path)
     if image is None:
         raise FileNotFoundError(f"Could not read image at path: {image_path}")
+    
+    # Scale down oversized images (e.g., 4000x3000 phone camera snapshots) to max 1200px
+    # This keeps peak memory under ~160 MB while preserving crisp OCR digit accuracy
+    h, w = image.shape[:2]
+    max_dim = 1200
+    if max(h, w) > max_dim:
+        scale = max_dim / float(max(h, w))
+        new_w, new_h = int(w * scale), int(h * scale)
+        image = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
     return image
 
 
