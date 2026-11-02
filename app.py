@@ -97,6 +97,19 @@ async def seed_admin():
         })
         print("Admin user seeded: admin@hospital.com / admin123")
 
+@app.get("/")
+async def root():
+    return {
+        "status": "online",
+        "service": "AI Hospital Discharge & Vital Monitoring System",
+        "docs_url": "/docs",
+        "health": "/health"
+    }
+
+@app.get("/health")
+async def health_check():
+    return {"status": "ok", "timestamp": datetime.now().isoformat()}
+
 @app.post("/login")
 async def login(email: str = Form(None), password: str = Form(None), patient_id: str = Form(None)):
     if patient_id:
@@ -866,4 +879,5 @@ async def generate_report(request: Request, patient_id: str):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
